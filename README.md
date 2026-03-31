@@ -139,6 +139,16 @@ This project demonstrates a complete container delivery workflow for a Django ap
 
 **Goal:** Create traceable, versioned artifacts for production deployments.
 
+---
+
+## Image Tagging Strategy
+
+| Tag | Purpose | Applied In |
+|-----|---------|------------|
+| `latest` | Always points to the most recent build | DEV + RELEASE |
+| `sha-<commit>` | Traceable to specific commit | DEV + RELEASE |
+| `v1.0.0` | Semantic version for releases | RELEASE only |
+
 
 ---
 
@@ -197,16 +207,6 @@ This approach makes the container self-sufficient and ready for any environmentâ
 | **Secrets management** | All credentials stored as GitHub Secrets |
 | **Caching** | Docker layer caching for faster builds |
 | **Database readiness** | Entrypoint script waits for DB before starting |
-
----
-
-## Image Tagging Strategy
-
-| Tag | Purpose | Applied In |
-|-----|---------|------------|
-| `latest` | Always points to the most recent build | DEV + RELEASE |
-| `sha-<commit>` | Traceable to specific commit | DEV + RELEASE |
-| `v1.0.0` | Semantic version for releases | RELEASE only |
 
 ---
 
