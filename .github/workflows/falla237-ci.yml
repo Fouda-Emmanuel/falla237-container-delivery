@@ -1,0 +1,235 @@
+name: Falla237 Container Delivery CI Pipeline
+on:
+  push:
+    branches: ["main"]
+    tags:
+      - "v*"
+  pull_request:
+    branches: ["main"]
+  
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_and_scan:
+    name: Build and Scan
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Start Build Job
+        run: echo "[INFO] Starting Build and Scan Job..."
+
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Build Docker Image Info
+        run: echo "[INFO] Building Docker image..."
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          load: true
+          tags: ${{ vars.IMAGE_NAME }}:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Scan Image (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+           image-ref: ${{ vars.IMAGE_NAME }}:ci
+           vuln-type: 'os,library'
+           format: 'table'
+           severity: 'HIGH,CRITICAL'
+           output: 'trivy-report.json'
+           exit-code: '0'
+
+      - name: Upload Trivy Report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-report
+          path: trivy-report.json
+      
+      - name: Scan Failure Message
+        if: ${{ failure() }}
+        run: |
+          echo "FAILED: Security Scan Failed (HIGH/CRITICAL Vulnerabilities)"
+
+      - name: PR Success Message
+        if: github.event_name == 'pull_request' && success()
+        run: | 
+          echo "SUCCESS: PR Validation Passed (No Image Pushed)"
+
+      - name: Build Success Message
+        if: ${{ success() }}
+        run: | 
+          echo "SUCCESS: Build and Scan COMPLETED!!"
+
+  publish:
+    name: Publish Image
+    runs-on: ubuntu-latest
+    environment: dev
+    needs: build_and_scan
+
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Start Publish Job
+        run: echo "[INFO] Starting Publish Job..."
+
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect Pipeline type
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            PIPELINE_TYPE=RELEASE
+            VERSION=${GITHUB_REF#refs/tags/}
+            echo "PIPELINE_TYPE=$PIPELINE_TYPE" >> $GITHUB_ENV
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+          else
+            PIPELINE_TYPE=DEV
+            echo "PIPELINE_TYPE=$PIPELINE_TYPE" >> $GITHUB_ENV
+          fi
+
+          echo "[INFO] Pipeline Type: $PIPELINE_TYPE"
+
+          if [[ "$PIPELINE_TYPE" == "RELEASE" ]]; then
+            echo "[INFO] Release Version: $VERSION"
+          fi
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+      
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: AWS Login Failure
+        if: ${{ failure() }}
+        run: |
+         echo "FAILED: AWS ECR Login Failed"
+
+      - name: Login to Docker Hub
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+        
+      - name: Docker Hub Login Failure
+        if: ${{ failure() }}
+        run: |
+          echo "FAILED: Docker Hub Authentication Failed"
+
+      - name: Build Docker Image Info (publish)
+        run: echo "[INFO] Rebuilding Docker image in publish job..."
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          load: true
+          tags: ${{ vars.IMAGE_NAME }}:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Failure Message (Publish)
+        if: ${{ failure() }}
+        run: |
+          echo "FAILED: Build stage Failed in publish job"
+
+      - name: Tag Images
+        run: |
+          set -euo pipefail
+          echo "[INFO] Tagging Images..."
+
+          SHA=${GITHUB_SHA::7}
+
+          docker tag "${{ vars.IMAGE_NAME }}:ci" "${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.IMAGE_NAME }}:latest"
+          docker tag "${{ vars.IMAGE_NAME }}:ci" "${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.IMAGE_NAME }}:sha-$SHA"
+
+          docker tag "${{ vars.IMAGE_NAME }}:ci" "${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest"
+          docker tag "${{ vars.IMAGE_NAME }}:ci" "${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:sha-$SHA"
+
+          if [ "$PIPELINE_TYPE" == "RELEASE" ]; then
+            if [[ -z "$VERSION" ]]; then
+             echo "ERROR: VERSION is empty. Cannot tag release image."
+             exit 1
+            fi 
+            docker tag "${{ vars.IMAGE_NAME }}:ci" "${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.IMAGE_NAME }}:$VERSION"
+            docker tag "${{ vars.IMAGE_NAME }}:ci" "${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:$VERSION"
+          fi
+
+      - name: Push Images
+        run: |
+          set -euo pipefail
+          echo "[INFO] Pushing Images..."
+
+          SHA=${GITHUB_SHA::7}
+
+          docker push "${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.IMAGE_NAME }}:latest"
+          docker push "${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.IMAGE_NAME }}:sha-$SHA"
+
+          if [ "$PIPELINE_TYPE" == "RELEASE" ]; then
+            docker push "${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.IMAGE_NAME }}:$VERSION"
+          fi
+
+          docker push "${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest"
+          docker push "${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:sha-$SHA"
+          
+          if [ "$PIPELINE_TYPE" == "RELEASE" ]; then
+            if [[ -z "$VERSION" ]]; then
+             echo "ERROR: VERSION is empty. Cannot tag release image."
+             exit 1
+            fi
+            docker push "${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:$VERSION"
+          fi
+
+      - name: Push Message Failure
+        if: ${{ failure() }}
+        run: |
+          echo "FAILED: Image Push Failed"
+      
+      - name: Final Success Message
+        if: ${{ success() }}
+        run: |
+          set -euo pipefail
+          SHA=${GITHUB_SHA::7}
+
+          if [ "$PIPELINE_TYPE" == "RELEASE" ]; then
+            echo "SUCCESS: Release published | Version: $VERSION"
+            echo "[INFO] Tags:"
+            echo "- latest" 
+            echo "- sha-$SHA" 
+            echo "- $VERSION"
+          else
+            echo "SUCCESS: Image pushed successfully!!"
+            echo "[INFO] Tags:"
+            echo "- latest" 
+            echo "- sha-$SHA" 
+          fi
+
+
+          
