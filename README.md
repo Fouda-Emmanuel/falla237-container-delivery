@@ -10,113 +10,91 @@ This project demonstrates a complete container delivery workflow for a Django ap
 
 ---
 
-## Project Architecture
+## CI/CD Pipeline Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         GITHUB ACTIONS                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │     PR       │    │   MAIN       │    │   RELEASE    │      │
-│  │  Validation  │ →  │ Development  │ →  │   Pipeline   │      │
-│  │  Pipeline    │    │  Pipeline    │    │              │      │
-│  └──────────────┘    └──────────────┘    └──────────────┘      │
-│         │                   │                   │               │
-│         ▼                   ▼                   ▼               │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │   Build      │    │   Build      │    │   Build      │      │
-│  │   +          │    │   +          │    │   +          │      │
-│  │   Trivy Scan │    │   Push to    │    │   Push to    │      │
-│  │   No Push    │    │   DockerHub  │    │   DockerHub  │      │
-│  │              │    │   + AWS ECR  │    │   + AWS ECR  │      │
-│  └──────────────┘    └──────────────┘    └──────────────┘      │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                    Falla237 Container Delivery CI Pipeline                          │
+│                        GitHub Actions Workflow                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 
----
-
-## Docker Implementation
-
-### Multi-Stage Dockerfile
-
-The Dockerfile uses a **multi-stage build** approach to create a lean, secure production image:
-
-| Stage | Purpose |
-|-------|---------|
-| **Builder** | Installs build dependencies, compiles requirements, and prepares the application |
-| **Runtime** | Creates a minimal production image with only runtime dependencies and the built application |
-
-**Key design decisions:**
-- **Security**: Uses a non-root user (`django-user`) for runtime
-- **Efficiency**: Only copies necessary artifacts from builder stage
-- **Database readiness**: Includes `libpq5` for PostgreSQL connectivity
-- **Static files**: Creates dedicated directories for static and media files
-
-### Entrypoint Script
-
-The `entrypoint.sh` script ensures the application starts reliably by implementing:
-
-| Feature | Purpose |
-|---------|---------|
-| **Database availability check** | Waits for the database to be ready before starting the application |
-| **Timeout mechanism** | 2-minute hard timeout with warning at 30 seconds |
-| **Static file collection** | Runs `collectstatic` automatically on startup |
-| **Error handling** | Uses `set -o errexit` to fail on any error |
-
-This approach makes the container self-sufficient and ready for any environment—whether running locally, on AWS, or on platforms like Render.
-
----
-
-## 🔄 CI/CD Pipeline Flow
-
-```
-Trigger:
-─────────────────────────────────
-│ Push to main / Tag v* / PR    │
-─────────────────────────────────
-                │
-                ▼
-Job 1: build_and_scan
-─────────────────────────────────
-│ • Build Docker image           │
-│ • Run Trivy security scan      │
-│ • Upload scan report           │
-─────────────────────────────────
-                │
-         ┌──────┴───────┐
-         │   Success?   │
-         └──────┬───────┘
-                │
-                ▼
-    ┌───────────────────────┐
-    │ PR Event?             │
-    └───────┬───────────────┘
-        Yes │               │ No
-            ▼               ▼
-    ┌─────────────┐   ┌─────────────────────┐
-    │ Done        │   │ Job 2: publish      │
-    │ No image    │   │─────────────────────│
-    │ pushed      │   │ • Detect DEV/RELEASE│
-    └─────────────┘   │ • Login to registries│
-                      │ • Tag images        │
-                      │ • Push to:          │
-                      │   - Docker Hub      │
-                      │   - AWS ECR         │
-                      └──────────┬──────────┘
-                                 │
-                         ┌───────┴───────┐
-                         │   Success?    │
-                         └───────┬───────┘
-                                 │
-                                 ▼
-                    ┌─────────────────────────┐
-                    │ Tags applied:           │
-                    │ • latest                │
-                    │ • sha-<commit>          │
-                    │ • v1.0.0 (if release)   │
-                    └─────────────────────────┘
+                                         │
+                    ┌────────────────────┼────────────────────┐
+                    │                    │                    │
+                 [PR Event]         [Push Event]         [Tag Event]
+               (pull_request)      (push to main)        (tags: v*)
+                    │                    │                    │
+                    └────────────────────┼────────────────────┘
+                                         │
+                                         ▼
+                    ┌────────────────────────────────────────┐
+                    │           JOB: build_and_scan          │
+                    │          (Runs for ALL events)         │
+                    └────────────────────────────────────────┘
+                                         │
+                    ┌────────────────────────────────────────┐
+                    │  Step: Checkout Code                   │
+                    │  Step: Setup Docker Buildx             │
+                    │  Step: Build Docker Image              │
+                    │  Step: Scan with Trivy                 │
+                    │  Step: Upload Trivy Report             │
+                    └────────────────────────────────────────┘
+                                         │
+                    ┌────────────────────┼────────────────────┐
+                    │                    │                    │
+                    ▼                    ▼                    ▼
+            ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+            │  PR Event    │    │  Push Event  │    │  Tag Event   │
+            │  (PR Only)   │    │  (main)      │    │  (v*)        │
+            └──────────────┘    └──────────────┘    └──────────────┘
+                    │                    │                    │
+                    │              ┌─────┴─────┐              │
+                    │              │           │              │
+                    │              ▼           ▼              ▼
+                    │    ┌─────────────────────────────────────────┐
+                    │    │      JOB: publish (Conditional)         │
+                    │    │      if: github.event_name != 'PR'      │
+                    │    └─────────────────────────────────────────┘
+                    │              │           │              │
+                    │              ▼           ▼              ▼
+                    │    ┌─────────────────────────────────────────┐
+                    │    │          Detect Pipeline Type:          │
+                    │    │          - Push → DEV pipeline          │
+                    │    │          - Tag  → RELEASE pipeline      │
+                    │    └─────────────────────────────────────────┘
+                    │              │           │              │
+                    │              ▼           ▼              ▼
+                    │    ┌─────────────────────────────────────────┐
+                    │    │         Configure AWS Credentials       │
+                    │    │         Login to Amazon ECR             │
+                    │    │         Login to Docker Hub             │
+                    │    └─────────────────────────────────────────┘
+                    │              │           │              │
+                    │              ▼           ▼              ▼
+                    │    ┌─────────────────────────────────────────┐
+                    │    │           Build Docker Image            │
+                    │    │           Tag Images:                   │
+                    │    │           - :latest                     │
+                    │    │           - :sha-{commit}               │
+                    │    │           - :{version} (RELEASE only)   │
+                    │    └─────────────────────────────────────────┘
+                    │              │           │              │
+                    │              ▼           ▼              ▼
+                    │    ┌─────────────────────────────────────────┐
+                    │    │              Push Images:               │
+                    │    │              → Docker Hub               │
+                    │    │              → Amazon ECR               │
+                    │    └─────────────────────────────────────────┘
+                    │              │           │              │
+                    ▼              ▼           ▼              ▼
+            ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+            │  PR Flow     │ │  Push Flow   │ │  Tag Flow    │
+            │  Ends Here   │ │  DEV Build   │ │  RELEASE     │
+            │              │ │  Published   │ │  Published   │
+            │ ✓ Validation │ │ ✓ :latest    │ │ ✓ :latest    │
+            │   Complete   │ │ ✓ :sha-*     │ │ ✓ :sha-*     │
+            └──────────────┘ │              │ │ ✓ :{version} │
+                             └──────────────┘ └──────────────┘
 ```
 
 ---
@@ -160,6 +138,39 @@ Job 1: build_and_scan
 | Push | Docker Hub + AWS ECR |
 
 **Goal:** Create traceable, versioned artifacts for production deployments.
+
+
+---
+
+## Docker Implementation
+
+### Multi-Stage Dockerfile
+
+The Dockerfile uses a **multi-stage build** approach to create a lean, secure production image:
+
+| Stage | Purpose |
+|-------|---------|
+| **Builder** | Installs build dependencies, compiles requirements, and prepares the application |
+| **Runtime** | Creates a minimal production image with only runtime dependencies and the built application |
+
+**Key design decisions:**
+- **Security**: Uses a non-root user (`django-user`) for runtime
+- **Efficiency**: Only copies necessary artifacts from builder stage
+- **Database readiness**: Includes `libpq5` for PostgreSQL connectivity
+- **Static files**: Creates dedicated directories for static and media files
+
+### Entrypoint Script
+
+The `entrypoint.sh` script ensures the application starts reliably by implementing:
+
+| Feature | Purpose |
+|---------|---------|
+| **Database availability check** | Waits for the database to be ready before starting the application |
+| **Timeout mechanism** | 2-minute hard timeout with warning at 30 seconds |
+| **Static file collection** | Runs `collectstatic` automatically on startup |
+| **Error handling** | Uses `set -o errexit` to fail on any error |
+
+This approach makes the container self-sufficient and ready for any environment—whether running locally, on AWS, or on platforms like Render.
 
 ---
 
